@@ -1,0 +1,37 @@
+{
+ "🏛️ Consolidadas EE. UU.": [
+  "MU",
+  "RHHBY",
+  "SHEL",
+  "TSM",
+  "CSCO"
+ ],
+ "🇨🇴 Colombia": [
+  "PFCIBEST.CL",
+  "MINEROS.CL",
+  "ECOPETROL.CL",
+  "GEB.CL",
+  "ISA.CL"
+ ],
+ "🌱 En crecimiento (riesgo alto)": [
+  "ZETA",
+  "RITM",
+  "IBRX",
+  "CRGY",
+  "BB"
+ ],
+ "🧺 ETF (solo por precio)": [
+  "SCHD",
+  "IWD",
+  "VTV",
+  "IVE",
+  "VIG"
+ ],
+ "🪙 Cripto (riesgo muy alto, solo por precio)": [
+  "HYPE",
+  "QNT",
+  "NEAR",
+  "ZEC",
+  "XMR"
+ ]
+}
