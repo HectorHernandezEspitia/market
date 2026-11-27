@@ -1,5 +1,5 @@
 """Bot que busca acciones, ETF y cripto, los califica y envía un resumen a Telegram."""
-import math, os, time
+import json, math, os, time
 import requests
 import yfinance as yf
 from yfinance import EquityQuery as EQ, ETFQuery as FQ
@@ -18,16 +18,26 @@ REGLAS = {  # (dato, valor de 0 puntos, valor máximo, peso)
 def num(x):
     return float(x) if isinstance(x,(int,float)) and math.isfinite(x) else None
 
+NOMBRES = {"roe":"rentabilidad", "margen":"margen de ganancia", "per":"precio/ganancias", "deuda":"deuda",
+           "r12":"precio en el año", "r6":"precio en 6 meses", "r3":"precio en 3 meses",
+           "ventas":"crecimiento de ventas", "margen_bruto":"margen bruto"}
+ESTADO = "estado.json"   # recuerda el top del último envío
+
 def puntuar(d, tipo):
     total = usado = 0
+    favor, contra = [], []
     for clave, malo, bueno, peso in REGLAS[tipo]:
         v = d.get(clave)
         if v is None: continue
         s = 0 if (clave=="per" and v<=0) else min(max((v-malo)/(bueno-malo),0),1)
         total += s*peso; usado += peso
+        if s >= 0.7: favor.append(NOMBRES[clave])
+        if s <= 0.3: contra.append(NOMBRES[clave])
     if usado < 0.6*sum(r[3] for r in REGLAS[tipo]) or d.get("caida") is None:
         return None
     castigo = max(abs(d["caida"])-CAIDA_TOLERADA, 0)*50
+    if castigo: contra.append(f"cayó hasta {abs(d['caida']):.0%} (resta {castigo:.0f} puntos)")
+    d["favor"], d["contra"] = ", ".join(favor), ", ".join(contra)
     return round(max(100*total/usado - castigo, 0))
 
 # ---------- BÚSQUEDA AUTOMÁTICA ----------
@@ -44,8 +54,17 @@ def universo_crecimiento():
                             EQ("gt",["quarterlyrevenuegrowth.quarterly",20]), EQ("gt",["avgdailyvol3m",500_000])]),
                   "avgdailyvol3m", CANDIDATAS)
 
+# Respaldo por si el buscador de Yahoo no devuelve las acciones colombianas
+BASE_COLOMBIA = ["ECOPETROL.CL","PFCIBEST.CL","ISA.CL","GEB.CL","GRUPOARGOS.CL",
+                 "CEMARGOS.CL","CELSIA.CL","MINEROS.CL"]
+
 def universo_colombia():
-    return [s for s in buscar(EQ("eq",["region","co"]), "intradaymarketcap", 250) if s.endswith(".CL")]
+    try:
+        halladas = [s for s in buscar(EQ("eq",["region","co"]), "intradaymarketcap", 250) if s.endswith(".CL")]
+    except Exception as e:
+        print("Buscador Colombia:", e); halladas = []
+    print("Colombia halladas por el buscador:", len(halladas))
+    return list(dict.fromkeys(BASE_COLOMBIA + halladas))
 
 def universo_etf():
     return buscar(FQ("and",[FQ("eq",["region","us"]), FQ("gt",["fundnetassets",1_000_000_000]),
@@ -68,7 +87,7 @@ def analizar(simbolos, tipo, solo_colombia=False, es_etf=False):
         try:
             t = yf.Ticker(s)
             info = t.info or {}
-            if solo_colombia and info.get("country") != "Colombia": continue
+            if solo_colombia and s not in BASE_COLOMBIA and info.get("country") != "Colombia": continue
             nombre = info.get("shortName") or s
             if es_etf and any(x in (info.get("longName") or nombre).lower() for x in APALANCADOS): continue
             d = historia(t)
@@ -103,28 +122,52 @@ def analizar_cripto():
     for c in r.json():
         s = c["symbol"].lower()
         v = [c.get(f"price_change_percentage_{k}_in_currency") for k in ("24h","30d","200d","1y")]
-        if s in ESTABLES or None in v: continue
+        if s in ESTABLES or s.startswith("figr") or None in v: continue
         if abs(c["current_price"]-1) < 0.03 and abs(v[3]) < 5: continue  # otras monedas estables
         dia, r30, r200, r1a = (x/100 for x in v)
         # Sin historia diaria: la "caída" es la peor entre el último mes, 200 días y año
-        p = puntuar({"r3":r30,"r6":r200,"r12":r1a,"caida":min(r30,r200,r1a,0)}, "precio")
-        filas.append({"simbolo":s.upper(), "nombre":c["name"], "puntaje":p, "dia":dia, "r12":r1a})
+        d = {"r3":r30,"r6":r200,"r12":r1a,"caida":min(r30,r200,r1a,0)}
+        p = puntuar(d, "precio")
+        # CoinGecko entrega otros periodos que Yahoo: se nombran como son
+        for k in ("favor","contra"):
+            d[k] = d[k].replace("6 meses","200 días").replace("3 meses","30 días")
+        filas.append({"simbolo":s.upper(), "nombre":c["name"], "puntaje":p, "dia":dia, "r12":r1a,
+                      "favor":d["favor"], "contra":d["contra"]})
     return sorted(filas, key=lambda f: -f["puntaje"])
 
 # ---------- MENSAJE ----------
-def seccion(titulo, funcion):
+def cambios(filas, antes):
+    if antes is None: return "Primer registro: mañana verás los cambios."
+    ahora = [f["simbolo"] for f in filas[:TOP]]
+    puntajes = {f["simbolo"]: f["puntaje"] for f in filas}
+    entran = [x for x in ahora if x not in antes]
+    salen = [f"{x} (ahora {puntajes[x]}/100)" if x in puntajes else f"{x} (sin calificación hoy)"
+             for x in antes if x not in ahora]
+    if not entran and not salen: return "Sin entradas ni salidas del top."
+    return f"🆕 Entran: {', '.join(entran) or 'ninguno'}\n❌ Salen: {', '.join(salen) or 'ninguno'}"
+
+def seccion(titulo, funcion, estado):
     try:
         filas = funcion()
         if not filas: return f"{titulo}\nSin datos hoy."
-        lineas = []
+        lineas = [cambios(filas, estado.get(titulo))]
         for f in filas[:TOP]:
-            alerta = " ⚠️ se movió fuerte hoy" if abs(f["dia"]) >= 0.05 else ""
-            lineas.append(f"• {f['simbolo']} ({f['nombre'][:28]}): {f['puntaje']}/100 | "
-                          f"hoy {f['dia']:+.1%} | año {f['r12']:+.0%}{alerta}")
+            alerta = " ⚠️ se movió fuerte" if abs(f["dia"]) >= 0.05 else ""
+            lineas.append(f"\n• {f['simbolo']} ({f['nombre'][:28]}): {f['puntaje']}/100 | "
+                          f"día {f['dia']:+.1%} | año {f['r12']:+.0%}{alerta}")
+            if f["favor"]: lineas.append(f"  ✅ {f['favor']}")
+            if f["contra"]: lineas.append(f"  🔻 {f['contra']}")
+        estado[titulo] = [f["simbolo"] for f in filas[:TOP]]
         return titulo + "\n" + "\n".join(lineas)
     except Exception as e:
         print(titulo, e)
         return f"{titulo}\nNo se pudo consultar hoy."
+
+def leer_estado():
+    try:
+        with open(ESTADO) as f: return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return {}
 
 def enviar(texto):
     token, chat = os.environ["TELEGRAM_TOKEN"], os.environ["TELEGRAM_CHAT_ID"]
@@ -134,14 +177,22 @@ def enviar(texto):
         raise SystemExit(f"Telegram rechazó el mensaje: {r.status_code} {r.text}")
 
 def main():
+    estado = leer_estado()
     partes = ["📊 Candidatos para INVESTIGAR (no son órdenes de compra)",
-        seccion("🏛️ Consolidadas EE. UU.", lambda: analizar(universo_consolidadas(), "consolidada")),
-        seccion("🇨🇴 Colombia", lambda: analizar(universo_colombia(), "consolidada", solo_colombia=True)),
-        seccion("🌱 En crecimiento (riesgo alto)", lambda: analizar(universo_crecimiento(), "crecimiento")),
-        seccion("🧺 ETF (solo por precio)", lambda: analizar(universo_etf(), "precio", es_etf=True)),
-        seccion("🪙 Cripto (riesgo muy alto, solo por precio)", analizar_cripto),
+        seccion("🏛️ Consolidadas EE. UU.", lambda: analizar(universo_consolidadas(), "consolidada"), estado),
+        seccion("🇨🇴 Colombia", lambda: analizar(universo_colombia(), "consolidada", solo_colombia=True), estado),
+        seccion("🌱 En crecimiento (riesgo alto)", lambda: analizar(universo_crecimiento(), "crecimiento"), estado),
+        seccion("🧺 ETF (solo por precio)", lambda: analizar(universo_etf(), "precio", es_etf=True), estado),
+        seccion("🪙 Cripto (riesgo muy alto, solo por precio)", analizar_cripto, estado),
         "El puntaje mira datos pasados; no predice el futuro. Fuentes: Yahoo Finance y CoinGecko."]
-    enviar("\n\n".join(partes))
+    # Telegram limita el tamaño: se reparte en varios mensajes
+    mensaje = ""
+    for parte in partes:
+        if mensaje and len(mensaje) + len(parte) > 3500:
+            enviar(mensaje); mensaje = ""
+        mensaje += ("\n\n" if mensaje else "") + parte
+    enviar(mensaje)
+    with open(ESTADO, "w") as f: json.dump(estado, f, ensure_ascii=False, indent=1)
 
 if __name__ == "__main__":
     main()
