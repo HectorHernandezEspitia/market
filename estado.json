@@ -14,8 +14,8 @@
   "ISA.CL"
  ],
  "🌱 En crecimiento (riesgo alto)": [
-  "ZETA",
   "RITM",
+  "ZETA",
   "IBRX",
   "CRGY",
   "BB"
@@ -24,14 +24,14 @@
   "SCHD",
   "IWD",
   "VTV",
-  "IVE",
-  "VIG"
+  "VIG",
+  "RSP"
  ],
  "🪙 Cripto (riesgo muy alto, solo por precio)": [
   "HYPE",
   "QNT",
   "NEAR",
   "ZEC",
-  "XMR"
+  "USDY"
  ]
 }
